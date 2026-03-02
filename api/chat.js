@@ -8,7 +8,12 @@ export default async function handler(req, res) {
   }
 
   try {
-    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ error: "Missing GEMINI_API_KEY in Vercel env vars" });
+    }
+
+    const genAI = new GoogleGenerativeAI(apiKey);
 
     const model = genAI.getGenerativeModel({
       model: "gemini-1.5-flash-latest",
@@ -16,6 +21,8 @@ export default async function handler(req, res) {
 
     const filePath = path.join(process.cwd(), "data", "faq.md");
     const kb = fs.readFileSync(filePath, "utf-8");
+
+    const userMessage = (req.body?.message || "").toString();
 
     const prompt = `
 You are Smart Builder 360 support assistant.
@@ -25,17 +32,18 @@ KNOWLEDGE:
 ${kb}
 
 User Question:
-${req.body.message}
+${userMessage}
 `;
 
     const result = await model.generateContent(prompt);
-    const response = await result.response;
-    const text = response.text();
+    const text = result.response.text();
 
-    res.status(200).json({ answer: text });
-
+    return res.status(200).json({ answer: text });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Something went wrong" });
+    console.error("API ERROR:", error);
+    return res.status(500).json({
+      error: "Something went wrong",
+      details: error?.message || String(error),
+    });
   }
 }
