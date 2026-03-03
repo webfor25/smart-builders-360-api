@@ -1,49 +1,53 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
 import fs from "fs";
 import path from "path";
+import { GoogleGenAI } from "@google/genai";
 
 export default async function handler(req, res) {
+  // CORS (optional but helpful for Webflow later)
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  if (req.method === "OPTIONS") return res.status(200).end();
+
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
   try {
+    const message = (req.body?.message || "").toString().trim();
+    if (!message) return res.status(400).json({ error: "Missing message" });
+
     const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      return res.status(500).json({ error: "Missing GEMINI_API_KEY in Vercel env vars" });
-    }
+    if (!apiKey) return res.status(500).json({ error: "Missing GEMINI_API_KEY" });
 
-    const genAI = new GoogleGenerativeAI(apiKey);
+    const ai = new GoogleGenAI({ apiKey });
 
-    const model = genAI.getGenerativeModel({
-      model: "gemini-1.5-flash-latest",
-    });
-
+    // Load your local knowledge base file
     const filePath = path.join(process.cwd(), "data", "faq.md");
     const kb = fs.readFileSync(filePath, "utf-8");
 
-    const userMessage = (req.body?.message || "").toString();
-
     const prompt = `
-You are Smart Builder 360 support assistant.
-Use ONLY the knowledge below to answer.
+You are Smart Builders 360 sales + support assistant.
+Use ONLY the knowledge below. If the answer is not in the knowledge, say you are not sure and suggest contacting support.
 
 KNOWLEDGE:
 ${kb}
 
-User Question:
-${userMessage}
-`;
+User question:
+${message}
+`.trim();
 
-    const result = await model.generateContent(prompt);
-    const text = result.response.text();
+    const response = await ai.models.generateContent({
+      // Use a model that exists (from Google quickstart)
+      model: "gemini-3-flash-preview",
+      contents: prompt,
+    });
 
-    return res.status(200).json({ answer: text });
-  } catch (error) {
-    console.error("API ERROR:", error);
+    return res.status(200).json({ answer: response.text || "No answer." });
+  } catch (err) {
     return res.status(500).json({
       error: "Something went wrong",
-      details: error?.message || String(error),
+      details: err?.message || String(err),
     });
   }
 }
