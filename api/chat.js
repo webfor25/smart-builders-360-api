@@ -15,7 +15,8 @@ export default async function handler(req, res) {
 
   try {
     const message = (req.body?.message || "").toString().trim();
-    if (!message) return res.status(400).json({ error: "Missing message" });
+    if (!message) return res.status(400).json({ error: "
+Missing message" });
 
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) return res.status(500).json({ error: "Missing GEMINI_API_KEY" });
@@ -23,8 +24,15 @@ export default async function handler(req, res) {
     const ai = new GoogleGenAI({ apiKey });
 
     // Load your local knowledge base file
-    const filePath = path.join(process.cwd(), "data", "faq.md");
-    const kb = fs.readFileSync(filePath, "utf-8");
+    const dataDir = path.join(process.cwd(), "data");
+const files = ["faq.md", "company.md", "integrations.md", "support_troubleshooting.md"];
+
+const kb = files
+  .map((f) => {
+    const p = path.join(dataDir, f);
+    return `\n\n### FILE: ${f}\n` + fs.readFileSync(p, "utf-8");
+  })
+  .join("\n");
 
     const prompt = `
 You are Smart Builders 360 sales + support assistant.
