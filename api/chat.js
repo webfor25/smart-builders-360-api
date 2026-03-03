@@ -30,7 +30,7 @@ export default async function handler(req, res) {
     const ai = new GoogleGenAI({ apiKey });
 
     const dataDir = path.join(process.cwd(), "data");
-    const files = ["faq.md", "company.md", "integrations.md", "support_troubleshooting.md"];
+    const files = ["faq.md", "company.md", "integrations.md", "support_troubleshooting.md" , "business_knowledge.md"];
 
     const kb = files
       .map((f) => {
