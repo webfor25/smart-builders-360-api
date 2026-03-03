@@ -11,6 +11,7 @@ function readSafe(filePath) {
 }
 
 export default async function handler(req, res) {
+  // CORS (needed for Webflow)
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -29,8 +30,15 @@ export default async function handler(req, res) {
 
     const ai = new GoogleGenAI({ apiKey });
 
+    // Load knowledge files from /data
     const dataDir = path.join(process.cwd(), "data");
-    const files = ["business_knowledge.md" , "faq.md", "company.md", "integrations.md", "support_troubleshooting.md"];
+    const files = [
+      "business_knowledge.md",
+      "faq.md",
+      "company.md",
+      "integrations.md",
+      "support_troubleshooting.md",
+    ];
 
     const kb = files
       .map((f) => {
@@ -50,12 +58,34 @@ User question:
 ${message}
 `.trim();
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
-      contents: prompt,
-    });
+    async function generateWithFallback(aiClient, promptText) {
+      try {
+        // Primary model (fast/cheap, but can be overloaded sometimes)
+        return await aiClient.models.generateContent({
+          model: "gemini-3-flash-preview",
+          contents: promptText,
+        });
+      } catch (err) {
+        const errorText = err?.message || String(err);
 
-    return res.status(200).json({ answer: response.text || "No answer." });
+        // Fallback on temporary overload / unavailable
+        if (errorText.includes("UNAVAILABLE") || errorText.includes("503")) {
+          console.log("Primary model overloaded, falling back to gemini-1.5-flash");
+          return await aiClient.models.generateContent({
+            model: "gemini-1.5-flash",
+            contents: promptText,
+          });
+        }
+
+        throw err;
+      }
+    }
+
+    const response = await generateWithFallback(ai, prompt);
+
+    return res.status(200).json({
+      answer: response?.text || "No answer.",
+    });
   } catch (err) {
     return res.status(500).json({
       error: "Something went wrong",
