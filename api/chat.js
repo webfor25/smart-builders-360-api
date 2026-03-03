@@ -2,9 +2,6 @@ import fs from "fs";
 import path from "path";
 import { GoogleGenAI } from "@google/genai";
 
-/* ===========================
-   SAFE FILE READER
-=========================== */
 function readSafe(filePath) {
   try {
     return fs.readFileSync(filePath, "utf-8");
@@ -13,97 +10,83 @@ function readSafe(filePath) {
   }
 }
 
-/* ===========================
-   OVERLOAD DETECTION
-=========================== */
-function isOverloadedError(err) {
-  const s = [
-    err?.message,
-    err?.stack,
-    typeof err === "string" ? err : "",
-    (() => {
-      try { return JSON.stringify(err); } catch { return ""; }
-    })(),
-  ].join(" ");
+function buildKnowledge() {
+  const dataDir = path.join(process.cwd(), "data");
+  const files = [
+    "faq.md",
+    "company.md",
+    "integrations.md",
+    "support_troubleshooting.md",
+    "business_knowledge.md",
+  ];
 
-  return (
-    s.includes('"code":503') ||
-    s.includes("503") ||
-    s.includes("UNAVAILABLE") ||
-    s.includes("high demand") ||
-    s.includes("Resource has been exhausted") ||
-    s.includes("429")
-  );
+  const kb = files
+    .map((f) => {
+      const p = path.join(dataDir, f);
+      const content = readSafe(p);
+      return content ? `\n\n### FILE: ${f}\n${content}` : "";
+    })
+    .filter(Boolean)
+    .join("\n");
+
+  return kb;
 }
 
-/* ===========================
-   SIMPLE SLEEP
-=========================== */
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
+function isRetryableGeminiError(err) {
+  // Gemini SDK often returns an object like:
+  // { error: { code: 503, message: "...", status: "UNAVAILABLE" } }
+  // Sometimes it's a stringified JSON in err.message
+  const msg = err?.message || "";
+  if (msg.includes('"code":503') || msg.includes("UNAVAILABLE")) return true;
+  if (msg.includes('"code":429') || msg.includes("RESOURCE_EXHAUSTED")) return true;
+  if (msg.includes('"code":500')) return true;
+  return false;
 }
 
-/* ===========================
-   RETRY WRAPPER
-=========================== */
-async function generateWithRetry(aiClient, model, promptText, retries = 2) {
-  let lastErr;
+function isModelNotFoundError(err) {
+  const msg = err?.message || "";
+  return msg.includes("404") && msg.includes("not found for API version");
+}
 
-  for (let i = 0; i <= retries; i++) {
+async function generateWithFallback(ai, models, prompt) {
+  let lastErr = null;
+
+  for (const modelName of models) {
     try {
-      return await aiClient.models.generateContent({
-        model,
-        contents: promptText,
+      const response = await ai.models.generateContent({
+        model: modelName,
+        contents: prompt,
       });
+
+      const text = response?.text || "";
+      if (text.trim()) return { text, usedModel: modelName };
+
+      // If model responded but empty, try next one
+      lastErr = new Error(`Empty response from ${modelName}`);
     } catch (err) {
       lastErr = err;
-      await sleep([300, 700, 1500][i] || 1500);
+
+      // If model name is not supported, skip to next model
+      if (isModelNotFoundError(err)) continue;
+
+      // If overloaded / rate-limited / transient, try next model
+      if (isRetryableGeminiError(err)) continue;
+
+      // Non-retryable error, stop immediately
+      throw err;
     }
   }
 
-  throw lastErr;
+  // If all models failed, throw the last error
+  throw lastErr || new Error("All models failed");
 }
 
-/* ===========================
-   PRIMARY + FALLBACK
-=========================== */
-async function generateWithFallback(aiClient, promptText) {
-  try {
-    // Primary model
-    return await generateWithRetry(
-      aiClient,
-      "gemini-3-flash-preview",
-      promptText,
-      1
-    );
-  } catch (err) {
-    if (isOverloadedError(err)) {
-      console.log("Primary overloaded → Falling back to gemini-1.5-flash");
-
-      return await generateWithRetry(
-        aiClient,
-        "gemini-1.5-flash",
-        promptText,
-        1
-      );
-    }
-
-    throw err;
-  }
-}
-
-/* ===========================
-   MAIN HANDLER
-=========================== */
 export default async function handler(req, res) {
-  // CORS
+  // CORS for Webflow
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
+  if (req.method === "OPTIONS") return res.status(200).end();
 
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
@@ -111,41 +94,25 @@ export default async function handler(req, res) {
 
   try {
     const message = (req.body?.message || "").toString().trim();
-    if (!message) {
-      return res.status(400).json({ error: "Missing message" });
-    }
+    if (!message) return res.status(400).json({ error: "Missing message" });
 
     const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      return res.status(500).json({ error: "Missing GEMINI_API_KEY" });
+    if (!apiKey) return res.status(500).json({ error: "Missing GEMINI_API_KEY" });
+
+    const kb = buildKnowledge();
+    if (!kb.trim()) {
+      return res.status(500).json({
+        error: "Knowledge base is empty",
+        details: "No readable .md files found in /data or they are empty.",
+      });
     }
 
     const ai = new GoogleGenAI({ apiKey });
 
-    // Load knowledge files
-    const dataDir = path.join(process.cwd(), "data");
-
-    const files = [
-      "business_knowledge.md",
-      "faq.md",
-      "company.md",
-      "integrations.md",
-      "support_troubleshooting.md",
-    ];
-
-    const kb = files
-      .map((file) => {
-        const filePath = path.join(dataDir, file);
-        return `\n\n### FILE: ${file}\n` + readSafe(filePath);
-      })
-      .join("\n");
-
     const prompt = `
-You are Smart Builders 360 sales and support assistant.
-
+You are Smart Builders 360 sales + support assistant.
 Use ONLY the knowledge below.
-If the answer is not found in the knowledge, say:
-"I’m not sure about that. Please contact support for more details."
+If the answer is not in the knowledge, say you are not sure and suggest contacting support.
 
 KNOWLEDGE:
 ${kb}
@@ -154,12 +121,17 @@ User question:
 ${message}
 `.trim();
 
-    const response = await generateWithFallback(ai, prompt);
+    // Use current, supported model names first.
+    // (Avoid gemini-1.5-flash on v1beta because it may 404.)
+    const models = [
+      "gemini-3-flash-preview",
+      "gemini-2.0-flash",
+      "gemini-2.0-flash-lite",
+    ];
 
-    return res.status(200).json({
-      answer: response?.text || "No answer.",
-    });
+    const { text, usedModel } = await generateWithFallback(ai, models, prompt);
 
+    return res.status(200).json({ answer: text, model: usedModel });
   } catch (err) {
     return res.status(500).json({
       error: "Something went wrong",
